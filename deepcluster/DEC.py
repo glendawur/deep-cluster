@@ -5,8 +5,8 @@ import numpy as np
 
 from sklearn.cluster import KMeans
 
-from autoencoder import Autoencoder, reconstruction_loss
-from auxiliary import vis
+from .autoencoder import Autoencoder, reconstruction_loss
+from .auxiliary import vis
 
 
 def init_weights_normal(layer):
@@ -24,23 +24,23 @@ class DEC(nn.Module):
     """
 
     def __init__(self, input_dim: int, embed_dim: int, n_clusters: int, intermediate: list, activation_f: list,
-                 alpha=1., is_trained: bool = False):
+                 is_trained: bool = False):
         super(DEC, self).__init__()
 
         self.autoencoder = Autoencoder(input_dim, embed_dim, intermediate, activation_f)
 
-        self.autoencoder.apply(self.init_weights_normal)
+        self.autoencoder.apply(init_weights_normal)
 
         self.autoencoder_trained = is_trained
 
         self.centers = torch.nn.Parameter(nn.init.uniform_(torch.zeros([n_clusters, embed_dim]), a=-1.0, b=1.0),
                                           requires_grad=True)
 
-    def forward(self, x):
+    def forward(self, x, alpha: float = 1):
         reconstruction, embedding = self.autoencoder(x)
         # compute q -> NxK
-        q = 1.0 / (1.0 + torch.sum((embedding.unsqueeze(1) - self.centers) ** 2, dim=2) / self.alpha)
-        q = q ** (self.alpha + 1.0) / 2.0
+        q = 1.0 / (1.0 + torch.sum((embedding.unsqueeze(1) - self.centers) ** 2, dim=2) / alpha)
+        q = q ** (alpha + 1.0) / 2.0
         q = q / torch.sum(q, dim=1, keepdim=True)
         return reconstruction, embedding, q
 
@@ -53,14 +53,16 @@ class DEC(nn.Module):
                  epochs: int = 100, pretrain_epochs: int = 100, dropout_rate: float = 0.2,
                  device=torch.device('cpu'), optimizer_params: dict = {'lr': 1e-1},
                  loss_params: dict = {'p': 2, 'pow': 2}, lr_adjustment: dict = {'rate': 0.1, 'freq': 30}):
+
         self.autoencoder.greedy_pretrain(dataloader, criterion=reconstruction_loss, optimizer=optimizer,
                                          epochs=pretrain_epochs, device=device,
                                          optimizer_params=optimizer_params, loss_params=loss_params,
-                                         dropout_rate=dropout_rate, lr_adjustment = lr_adjustment)
+                                         dropout_rate=dropout_rate, lr_adjustment=lr_adjustment)
 
-        self.autoencoder.train_autoencoder(dataloader, criterion, optimizer=optimizer, epochs=epochs,
-                                           device=device, optimizer_params=optimizer_params,
-                                           loss_params=loss_params, lr_adjustment = lr_adjustment)
+        self.autoencoder.train_autoencoder(dataloader, criterion=reconstruction_loss, optimizer=optimizer,
+                                           epochs=epochs, device=device,
+                                           optimizer_params=optimizer_params, loss_params=loss_params,
+                                           lr_adjustment=lr_adjustment)
         self.autoencoder.is_trained = True
 
     def fit_finetune(self, dataloader, criterion=kl_divergence, optimizer=torch.optim.SGD, epochs: int = 50,
@@ -94,8 +96,8 @@ class DEC(nn.Module):
                 delta_label = np.sum(y_pred != y_old).astype(np.float32) / y_pred.shape[0]
 
                 my_dataset = TensorDataset(dataloader.dataset.tensors[0],
-                                                 dataloader.dataset.tensors[1],
-                                                 p)
+                                           dataloader.dataset.tensors[1],
+                                           p)
                 dataloader = DataLoader(my_dataset, batch_size=dataloader.batch_size, shuffle=True)
 
                 y_old = y_pred

@@ -117,12 +117,13 @@ class Autoencoder(nn.Module):
         previous_layers = nn.Sequential()
 
         for i, (enc, dec) in enumerate(
-                zip(list(self.encoder.layers.children()), list(self.decoder.layers.children()))):
+                zip(list(self.encoder.layers.children()), list(self.decoder.layers.children())[::-1])):
             previous_layers.eval()
-
-            dropout = nn.Dropout(p=dropout_rate)
+            dropout1 = nn.Dropout(p=dropout_rate)
+            dropout2 = nn.Dropout(p=dropout_rate)
             enc.to(device)
             dec.to(device)
+
             optim = optimizer([{'params': enc.parameters()}, {'params': dec.parameters()}], **optimizer_params)
 
             for epoch in range(epochs):
@@ -130,23 +131,27 @@ class Autoencoder(nn.Module):
                 length = 0
 
                 if (epoch > 0) & (epoch % lr_adjustment['freq'] == 0):
-                    for j, param_group in enumerate(optimizer.param_groups):
+                    for j, param_group in enumerate(optim.param_groups):
                         param_group['lr'] *= lr_adjustment['rate']
-                        print(f'Learning Rate of param group {j} updated to {param_group["lr"]}')
+                        #print(f'Learning Rate of param group {j} updated to {param_group["lr"]}')
+                    print(f'Learning Rate is updated')
 
                 for batch_idx, (x, y) in enumerate(dataloader):
                     x, y = x.to(device), y.to(device)
-                    optim.zero_grad()
 
-                    rec = dec(dropout(enc(dropout(previous_layers(x)))))
+                    optim.zero_grad()
+                    previous = previous_layers(x)
+                    embed = enc(dropout2(previous))
+                    rec = dec(dropout1(embed))
 
                     loss = criterion(rec, previous_layers(x), **loss_params)
                     loss_value += loss.item()
                     length += x.shape[0]
 
                     loss.backward()
-                    optimizer.step()
+                    optim.step()
 
                 n_datapoints = dataloader.dataset.tensors[0].shape[0]
+                #print
             previous_layers.append(enc)
             print(f'Layer {i} trained')

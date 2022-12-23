@@ -5,8 +5,9 @@ import numpy as np
 
 from sklearn.cluster import KMeans
 
-from autoencoder import Autoencoder, reconstruction_loss
-from auxiliary import vis
+from .autoencoder import Autoencoder, reconstruction_loss
+from .auxiliary import vis
+from .auxiliary import vis
 
 
 def init_weights_normal(layer):
@@ -31,18 +32,18 @@ class IDEC(nn.Module):
 
         self.autoencoder = Autoencoder(input_dim, embed_dim, intermediate, activation_f)
 
-        self.autoencoder.apply(self.init_weights_normal)
+        self.autoencoder.apply(init_weights_normal)
 
-        self.autoencoder_trained = is_trained
+        self.autoencoder.is_trained = is_trained
 
         self.centers = torch.nn.Parameter(nn.init.uniform_(torch.zeros([n_clusters, embed_dim]), a=-1.0, b=1.0),
                                           requires_grad=True)
 
-    def forward(self, x):
+    def forward(self, x, alpha: float = 2):
         reconstruction, embedding = self.autoencoder(x)
         # compute q -> NxK
-        q = 1.0 / (1.0 + torch.sum((embedding.unsqueeze(1) - self.centers) ** 2, dim=2) / self.alpha)
-        q = q ** (self.alpha + 1.0) / 2.0
+        q = 1.0 / (1.0 + torch.sum((embedding.unsqueeze(1) - self.centers) ** 2, dim=2) / alpha)
+        q = q ** (alpha + 1.0) / 2.0
         q = q / torch.sum(q, dim=1, keepdim=True)
         return reconstruction, embedding, q
 
@@ -96,8 +97,8 @@ class IDEC(nn.Module):
                 delta_label = np.sum(y_pred != y_old).astype(np.float32) / y_pred.shape[0]
 
                 my_dataset = TensorDataset(dataloader.dataset.tensors[0],
-                                                 dataloader.dataset.tensors[1],
-                                                 p)
+                                           dataloader.dataset.tensors[1],
+                                           p)
                 dataloader = DataLoader(my_dataset, batch_size=dataloader.batch_size, shuffle=True)
 
                 y_old = y_pred
