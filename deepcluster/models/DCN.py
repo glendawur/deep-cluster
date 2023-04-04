@@ -42,7 +42,7 @@ class DCN(nn.Module):
 
         self.autoencoder = Autoencoder(input_dim, embed_dim, intermediate, activation_f)
         self.centers = torch.nn.Parameter(nn.init.uniform_(torch.zeros([n_clusters, embed_dim]), a=-1.0, b=1.0),
-                                          requires_grad=True)
+                                          requires_grad=False)
 
         self.count = torch.ones(n_clusters, dtype=torch.int)
 
@@ -52,7 +52,7 @@ class DCN(nn.Module):
 
         return reconstruction, embedding
 
-    def predict(self, x, one_hot: bool = False):
+    def predict(self, x, one_hot: bool = False, p = 2):
         distance = torch.cdist(x, self.centers, p=p)
         label = distance.argmin(dim=1)
         if one_hot:
@@ -60,7 +60,7 @@ class DCN(nn.Module):
         else:
             return label
 
-    def ae_pretrain(self, dataloader, criterion=reconstruction_loss, optimizer=torch.optim.Adam,
+    def ae_train(self, dataloader, criterion=reconstruction_loss, optimizer=torch.optim.Adam,
                     epochs: int = 100, dropout_rate: float = 0,
                     device=torch.device('cpu'), optimizer_params: dict = {'lr': 1e-1, 'betas': (0.9, 0.999)},
                     loss_params: dict = {'p': 2, 'pow': 2}, lr_adjustment: dict = {'rate': 0.1, 'freq': np.inf}):
@@ -82,7 +82,7 @@ class DCN(nn.Module):
 
         return new_assignment
 
-    def fit(self, dataloader, criterion=dcn_loss, optimizer=torch.optim.Adam,
+    def fit_finetune(self, dataloader, criterion=dcn_loss, optimizer=torch.optim.Adam,
             epochs: int = 100, n_init: int = 20,
             device=torch.device('cpu'), optimizer_params: dict = {'lr': 1e-1, 'betas': (0.9, 0.999)},
             loss_params: dict = {'gamma': 0.5, 'p1': 2, 'pow1': 2, 'p2': 2, 'pow2': 2}, vis_freq: int = None):

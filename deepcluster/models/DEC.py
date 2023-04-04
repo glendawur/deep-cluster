@@ -7,39 +7,39 @@ from sklearn.cluster import KMeans
 
 from .autoencoder import Autoencoder, reconstruction_loss
 from .auxiliary import vis
-from .auxiliary import vis
+from .DKM import init_weights_xavier
 
 
 def init_weights_normal(layer):
     if isinstance(layer, (nn.Linear, nn.Conv2d)):
-        nn.init.normal_(layer.weight)
+        nn.init.normal_(layer.weight, 0, 0.01)
 
 
-def idec_loss(x, reconstruction, p, q, gamma: float = 0.1, p1: int = 2, pow1=2):
-    loss_kl = torch.sum(p * torch.log(p / (q + 1e-6)), dim=1).sum()
-    loss_r = torch.pow(torch.norm(x - reconstruction, p=p1, dim=1), pow1).sum()
-    return loss_r + gamma * loss_kl, loss_r, loss_kl
+def kl_divergence(p, q):
+    return torch.sum(p * torch.log(p / (q + 1e-6)), dim=1).sum()
 
 
-class IDEC(nn.Module):
+class DEC(nn.Module):
     """
     MLP Decoder
     """
 
     def __init__(self, input_dim: int, embed_dim: int, n_clusters: int, intermediate: list, activation_f: list,
-                 alpha=1., is_trained: bool = False):
-        super(IDEC, self).__init__()
+                 is_trained: bool = False):
+        super(DEC, self).__init__()
 
         self.autoencoder = Autoencoder(input_dim, embed_dim, intermediate, activation_f)
 
         self.autoencoder.apply(init_weights_normal)
 
-        self.autoencoder.is_trained = is_trained
+        self.autoencoder_trained = is_trained
 
         self.centers = torch.nn.Parameter(nn.init.uniform_(torch.zeros([n_clusters, embed_dim]), a=-1.0, b=1.0),
                                           requires_grad=True)
 
-    def forward(self, x, alpha: float = 2):
+        self.alpha = 1
+
+    def forward(self, x, alpha: float = 0.1):
         reconstruction, embedding = self.autoencoder(x)
         # compute q -> NxK
         q = 1.0 / (1.0 + torch.sum((embedding.unsqueeze(1) - self.centers) ** 2, dim=2) / alpha)
@@ -52,27 +52,29 @@ class IDEC(nn.Module):
         p = p / torch.sum(p, dim=1, keepdim=True)
         return p
 
-    def ae_train(self, dataloader, criterion=reconstruction_loss, optimizer=torch.optim.Adam,
-                 epochs: int = 100, pretrain_epochs: int = 100, dropout_rate: float = 0.0,
-                 device=torch.device('cpu'), optimizer_params: dict = {'lr': 1e-3, 'betas': (0.9, 0.999)},
-                 loss_params: dict = {'p': 2, 'pow': 2}):
+    def ae_train(self, dataloader, criterion=reconstruction_loss, optimizer=torch.optim.SGD,
+                 epochs: int = 100, pretrain_epochs: int = 100, dropout_rate: float = 0.2,
+                 device=torch.device('cpu'), optimizer_params: dict = {'lr': 1e-3},
+                 loss_params: dict = {'p': 2, 'pow': 2}, lr_adjustment: dict = {'rate': 0.1, 'freq': 30}):
+
         self.autoencoder.greedy_pretrain(dataloader, criterion=reconstruction_loss, optimizer=optimizer,
                                          epochs=pretrain_epochs, device=device,
                                          optimizer_params=optimizer_params, loss_params=loss_params,
-                                         dropout_rate=dropout_rate)
+                                         dropout_rate=dropout_rate, lr_adjustment=lr_adjustment)
 
-        self.autoencoder.train_autoencoder(dataloader, criterion, optimizer=optimizer, epochs=epochs,
-                                           device=device, optimizer_params=optimizer_params,
-                                           loss_params=loss_params)
+        self.autoencoder.train_autoencoder(dataloader, criterion=reconstruction_loss, optimizer=optimizer,
+                                           epochs=epochs, device=device,
+                                           optimizer_params=optimizer_params, loss_params=loss_params,
+                                           lr_adjustment=lr_adjustment)
         self.autoencoder.is_trained = True
 
-    def fit_finetune(self, dataloader, criterion=idec_loss, optimizer=torch.optim.Adam, epochs: int = 50,
+    def fit_finetune(self, dataloader, criterion=kl_divergence, optimizer=torch.optim.SGD, epochs: int = 50,
                      update_interval: int = 1, tol: float = 1e-3, n_init: int = 20,
-                     device=torch.device('cpu'), optimizer_params: dict = {'lr': 1e-3, 'betas': (0.9, 0.999)},
-                     loss_params: dict = {'gamma': 0.1, 'p1': 2, 'pow1': 2},
+                     device=torch.device('cpu'), optimizer_params: dict = {'lr': 1e-3},
                      vis_freq: int = None):
         self.to(device=device)
         self.train()
+
         optimizer = optimizer(self.parameters(), **optimizer_params)
 
         if vis_freq is not None:
@@ -108,20 +110,15 @@ class IDEC(nn.Module):
                     break
 
             overall_loss = 0
-            overall_r_loss = 0
-            overall_c_loss = 0
-
             for batch_idx, (x, _, p) in enumerate(dataloader):
                 x, p = x.to(device), p.to(device)
 
                 optimizer.zero_grad()
 
-                rec, _, q = self(x)
-                loss, loss_r, loss_kl = criterion(x, rec, p, q, **loss_params)
+                _, _, q = self(x)
+                loss = criterion(p, q)
 
                 overall_loss += loss.item()
-                overall_r_loss += loss_r.item()
-                overall_c_loss += loss_kl.item()
 
                 loss.backward()
                 optimizer.step()
@@ -130,6 +127,4 @@ class IDEC(nn.Module):
                 vis(self, dataloader, epoch)
 
             print("\tEpoch", epoch + 1, "\t AvgLoss: ",
-                  np.round(overall_loss / dataloader.dataset.tensors[0].shape[0], 5),
-                  "\t Rec Loss: ", np.round(overall_r_loss / dataloader.dataset.tensors[0].shape[0], 5),
-                  "\t KL Loss: ", np.round(overall_c_loss / dataloader.dataset.tensors[0].shape[0], 5))
+                  np.round(overall_loss / dataloader.dataset.tensors[0].shape[0], 5))
