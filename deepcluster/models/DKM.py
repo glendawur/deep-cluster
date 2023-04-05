@@ -1,9 +1,16 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 import numpy as np
 
+from sklearn.metrics import adjusted_rand_score
 from sklearn.cluster import KMeans
+from sklearn.manifold import TSNE
+
+from torch.utils.tensorboard import SummaryWriter
+
+import matplotlib.pyplot as plt
 
 from .autoencoder import Autoencoder, reconstruction_loss
 from .auxiliary import vis
@@ -32,13 +39,15 @@ class DKM(nn.Module):
         self.centers = torch.nn.Parameter(nn.init.uniform_(torch.zeros([n_clusters, embed_dim]), a=-1.0, b=1.0),
                                           requires_grad=True)
 
-    def forward(self, x, alpha=1000):
+    def forward(self, x):
         reconstruction, embedding = self.autoencoder(x)
 
-        distances = torch.cdist(embedding, self.centers)
+        return reconstruction, embedding
+    
+    def predict(self, z,  alpha=1000):
+        distances = torch.cdist(z, self.centers)
         labels = F.softmax(-alpha * distances, dim=1)
-
-        return reconstruction, embedding, labels
+        return labels
 
     def ae_train(self, dataloader, criterion=reconstruction_loss, optimizer=torch.optim.Adam, epochs: int = 100,
                  device=torch.device('cpu'), optimizer_params: dict = {'lr': 1e-3, 'betas': (0.9, 0.999)},
@@ -83,7 +92,8 @@ class DKM(nn.Module):
 
                 optimizer.zero_grad()
 
-                embedding, rec, labels = self(x, alpha)
+                rec, embedding = self(x)
+                labels = self.predict(embedding, alpha)
 
                 loss, r_loss, c_loss = criterion(x, embedding, rec, labels, self.centers, **loss_params)
 
@@ -108,3 +118,85 @@ class DKM(nn.Module):
                   np.round(overall_r_loss / n_datapoints, 5), "\t Cls Loss: ",
                   np.round(overall_c_loss / n_datapoints, 5),
                   "\t Alpha: ", np.round(alpha, 5))
+
+def train_dkm_net(model, dataloader_train, dataloader_test =  None,  epochs: int = 200,
+              loss_w: dict = {'rec': 0.75, 'cls': 0.25}, alpha: float = 0.01, name: str = 'DKM', dataset: str = ''):
+
+    writer = SummaryWriter(comment = f'_{name}_{dataset}')
+
+    opt = torch.optim.Adam(model.parameters(), lr=0.001)
+
+    device = torch.device('cpu')
+
+    _, z = model(dataloader_test.dataset.data)
+    km = KMeans(n_clusters=model.centers.shape[0]).fit(z.detach().numpy())
+    model.centers.data = torch.Tensor(km.cluster_centers_)
+
+    for epoch in range(epochs):
+        overall_loss = 0
+        rec_loss = 0
+        cls_loss = 0
+        
+        for batch_idx, (x, y) in enumerate(dataloader_train):            
+            x, y = x.to(device), y.to(device)
+
+            opt.zero_grad()
+
+            rec, z = model(x)    
+                
+            rec_batch = torch.pow(torch.norm(x.view(x.shape[0], -1) - rec.view(rec.shape[0], -1), p=2, dim=1), 2).sum()
+            labels = model.predict(z, alpha)
+            cls_batch = torch.pow(torch.norm(z - torch.matmul(labels, model.centers), p=2, dim=1), 2).sum()
+
+            loss=loss_w['rec']*rec_batch + loss_w['cls']*cls_batch
+
+            loss.backward()
+            
+            opt.step()
+            
+            overall_loss += loss.item()
+            rec_loss += rec_batch.item()
+            cls_loss += cls_batch.item()
+            
+        n_datapoints = dataloader_train.dataset.data.shape[0]
+
+        overall_loss /= n_datapoints
+        rec_loss /= n_datapoints
+        cls_loss /= n_datapoints
+
+        if dataloader_test is not None:
+            sample_x, sample_y = next(iter(dataloader_test))
+            _, z = model(sample_x)
+            y_pred = model.predict(z.detach(), alpha = 100).argmax(dim = 1).detach()
+            writer.add_scalar('Metrics/Validation_ARI', adjusted_rand_score(y_pred.numpy(), sample_y.numpy()), epoch)
+            
+        _, z = model(dataloader_train.dataset.data)
+        labels = model.predict(z.detach(), alpha = 100).argmax(dim=1)
+        writer.add_scalar('Metrics/Train_ARI', adjusted_rand_score(labels.numpy().shape[0],
+                                                              dataloader_train.dataset.targets.numpy()), epoch)
+        writer.add_scalar('Metrics/UniqueLabels', labels.unique().numpy(), epoch)
+        
+        writer.add_scalar('Alpha', alpha,  epoch)
+        writer.add_scalar("Loss/Total", loss, epoch)
+        writer.add_scalar("Loss/Clustering", cls_loss, epoch)
+        writer.add_scalar('Loss/Reconstruction', rec_loss, epoch)
+        
+        writer.flush()
+        
+        alpha = (2 ** (1 / (np.log(epoch + 3) + int((epoch + 3) == 1)) ** 2)) * alpha
+
+    _, z = model(dataloader_train.dataset.data)
+    y_pred = model.predict(z.detach(), alpha = 100).argmax(dim = 1).detach()
+    print("\t Final ARI on train: ", adjusted_rand_score(y_pred.numpy(), dataloader_train.dataset.targets.numpy()))
+    
+    writer.add_graph(model, next(iter(dataloader_train))[0])
+    #writer.add_embedding(z, metadata = dataloader_train.dataset.targets, tag='Final Latent Space')
+    
+    if dataloader_test is not None:
+        _, z = model(dataloader_test.dataset.data)
+        y_pred = model.predict(z.detach(), alpha = 100).argmax(dim = 1).detach()
+        print("\t Final ARI on test: ", adjusted_rand_score(y_pred.numpy(), dataloader_test.dataset.targets.numpy()))
+
+    writer.flush()
+
+    return model
