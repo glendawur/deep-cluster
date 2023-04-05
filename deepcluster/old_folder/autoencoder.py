@@ -15,20 +15,20 @@ class Encoder(nn.Module):
     MLP Encoder
     """
 
-    def __init__(self, input_dim: int, embed_dim: int, intermediate: list, activation_f: list):
+    def __init__(self, input_dim: int, embed_dim: int, intermediate: list, activations: list):
         super(Encoder, self).__init__()
 
         self.layers = nn.Sequential()
 
         self.layers.append(nn.Sequential(nn.Linear(input_dim, intermediate[0]),
-                                         activation_f[0]))
+                                         activations[0]))
 
-        for i in range(1, min(len(intermediate), len(activation_f))):
+        for i in range(1, min(len(intermediate), len(activations))):
             self.layers.append(nn.Sequential(nn.Linear(intermediate[i - 1], intermediate[i]),
-                                             activation_f[i]))
+                                             activations[i]))
 
         self.layers.append(nn.Sequential(nn.Linear(intermediate[min(len(intermediate),
-                                                                    len(activation_f)) - 1],
+                                                                    len(activations)) - 1],
                                                    embed_dim)))
 
     def forward(self, x):
@@ -40,20 +40,20 @@ class Decoder(nn.Module):
     MLP Decoder
     """
 
-    def __init__(self, embed_dim: int, input_dim: int, intermediate: list, activation_f: list):
+    def __init__(self, embed_dim: int, input_dim: int, intermediate: list, activations: list):
         super(Decoder, self).__init__()
 
         self.layers = nn.Sequential()
 
         self.layers.append(nn.Sequential(nn.Linear(embed_dim, intermediate[0]),
-                                         activation_f[0]))
+                                         activations[0]))
 
-        for i in range(1, min(len(intermediate), len(activation_f))):
+        for i in range(1, min(len(intermediate), len(activations))):
             self.layers.append(nn.Sequential(nn.Linear(intermediate[i - 1], intermediate[i]),
-                                             activation_f[i]))
+                                             activations[i]))
 
         self.layers.append(nn.Sequential(nn.Linear(intermediate[min(len(intermediate),
-                                                                    len(activation_f)) - 1],
+                                                                    len(activations)) - 1],
                                                    input_dim)))
 
     def forward(self, x):
@@ -65,13 +65,13 @@ class Autoencoder(nn.Module):
     Default symmetrical autoencoder
     """
 
-    def __init__(self, input_dim: int, embedding_dim: int, intermediate: list, activation_f: list):
+    def __init__(self, input_dim: int, embedding_dim: int, intermediate: list, activations: list):
         super(Autoencoder, self).__init__()
 
-        max_len = min(len(intermediate), len(activation_f))
+        max_len = min(len(intermediate), len(activations))
         self.is_trained = False
-        self.encoder = Encoder(input_dim, embedding_dim, intermediate[:max_len], activation_f[:max_len])
-        self.decoder = Decoder(embedding_dim, input_dim, intermediate[:max_len][::-1], activation_f[:max_len][::-1])
+        self.encoder = Encoder(input_dim, embedding_dim, intermediate[:max_len], activations[:max_len])
+        self.decoder = Decoder(embedding_dim, input_dim, intermediate[:max_len][::-1], activations[:max_len][::-1])
 
     def forward(self, x):
         embedding = self.encoder(x)
