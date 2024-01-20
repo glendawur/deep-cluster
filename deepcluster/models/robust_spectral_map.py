@@ -5,6 +5,9 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 import numpy as np
+from graph_kernels.kernels import BaseKernel, StochasticKNeighborsKernel
+
+from sklearn.cluster import KMeans
 
 class RobustSpectralMap(torch.nn.Module):
     """
@@ -29,101 +32,101 @@ class RobustSpectralMap(torch.nn.Module):
         """
         return self.encoder(x)
     
+    @torch.inference_mode
+    def transform(self, x):
+        return self(x)
+
+
     def fit(self, 
             train_dataset: Union[Dataset, DataLoader, Tensor],
             optimizer: torch.optim.Optimizer = torch.optim.Adam,
             optimizer_config: dict = {'lr': 0.001, 
                                       'etas': (0.9, 0.999), 
                                       'eps': 1e-8, 
-                                      'weight_decay': 0},
-            graph_kernel = None,
-            batch_size: int = 512,
-            epochs: int = 1,
-            device: Union[str, torch.device] = 'cpu'):
-        
-        
-# class RobustSpectralMap:
-#     """
-#     """
-#     def __init__(self, 
-#                  net,
-#                  optim_config: dict = {'lr': 0.001, 
-#                                        'weight_decay': 1e-05},
-#                  batch_size: int = 512,
-#                  epochs: int = 100,
-#                  k_range: (int, int) = (2,25),
-#                  kernel_config: dict = {'proporional': True,
-#                                         'mutual': True},
-#                  l: float = 1.,
-#                  scheduler_timesteps: list = None,
-#                  device: str = None) -> None:
-#         """
-        
-#         """
-#         if device is None:
-#             self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu') 
-#         self.net = net.to(device)
-#         self.optim = torch.optim.Adam(self.net.parameters(), **optim_config)
-#         self.scheduler = torch.optim.lr_scheduler.ExponentialLR(self.optim, gamma = 0.1)
+                                      'weight_decay': 1e-05},
+            constraint_weight: float = 1.,
+            graph_kernel: BaseKernel = StochasticKNeighborsKernel(kernel_parameters=dict(min_value=2, max_value=30),
+                                                                   distance_function=torch.cdist,
+                                                                   distance_parameters=dict(p=2),
+                                                                   random_distribution=np.random.randint,
+                                                                   mutual=True,
+                                                                   symmetric=True,
+                                                                   proportional=True),
+            batch_size: int = 256,
+            epochs: int = 100,
+            scheduler: torch.optim.lr_scheduler = torch.optim.lr_scheduler.ExponentialLR,
+            scheduler_params: dict = dict(gamma=0.1),
+            scheduler_steps: List[int] = [20, 40, 60, 80],
+            device: Union[str, torch.device] = 'cpu',
+            tolerance: float = 1e-7):
+        """
+        """
+        if isinstance(device, str):
+            if device == 'cuda' & torch.cuda.is_available():
+                device = torch.device(device)
+            elif not torch.cuda.is_available():
+                device = torch.device('cpu')
 
-#         self.kernel_config = kernel_config
-#         self.batch_size = batch_size
-#         self.epochs = epochs
-#         self.k_range = k_range
-#         self.l = l
-#         self.scheduler_steps = scheduler_timesteps
-        
+        # train dataset checks
+        if isinstance(train_dataset, Tensor):
+            train_dataset = TensorDataset(train_dataset)
+        if isinstance(train_dataset, Dataset):
+            train_dataset = DataLoader(train_dataset, 
+                                       batch_size=batch_size if batch_size is not None else 256,
+                                       shuffle=True)    
+        self.training_history = {'training loss': []}
 
+        self.encoder = self.encoder.to(device)
 
-#     def fit(self, X: torch.Tensor, y: torch.Tensor = None):
-#         """
-#         """
-#         data_loader = DataLoader(TensorDataset(X), shuffle=True, batch_size = self.batch_size)
-#         self.net = self.net.to(device=self.device)
+        opt = optimizer([{'params': self.encoder.parameters()}],
+                         **optimizer_config)
+        opt_scheduler = scheduler(opt, **scheduler_params)
 
-#         t = trange(self.epochs, leave=True)
-#         for epoch in t:
-#             overall_loss = 0.0
-#             rc_loss = 0.0
-#             pen_loss = 0.0
-#             for x_batch in data_loader:
-#                 self.optim.zero_grad()
-                
-#                 x_batch = x_batch.to(self.device)
-                
-#                 # compute kernel and compute Laplacian related matrices
-#                 n_neighbors = np.random.randint(self.k_range[0], self.k_range[1]+1, 1) 
-#                 S = nearest_neighbors_kernel(x_batch, **self.kernel_config)
-#                 if S.device != x_batch.device:
-#                     S = S.to(device = x_batch.device)
-#                 D = torch.sqrt(S.sum(dim=1)+1e-7).view(-1,1)
+        pbar = tqdm.trange(stop=epochs, leave=True)
+        for epoch in pbar:
+            output_string = ''
+            train_loss = 0
+            ratio_cut_loss = 0
+            penalty_loss = 0
+            n_size = 0
 
-#                 # network parameters should be taken into account
-#                 z = self.net(x_batch)
+            for batch_id, (x, y, idx) in enumerate(train_dataset):
+                opt.zero_grad()
+                x,y = x.to(device), y.to(device)
 
-#                 # compute losses
-#                 ratio_cut = torch.sum(torch.pow(S*torch.cdist(z/D, z/D), 2))/2
-#                 penalty = torch.norm(torch.mm(z.T, z) - torch.eye(z.shape[1], device = self.device), p='fro')
+                S = graph_kernel.compute(x, x)
+                D = torch.sqrt(S.sum(dim = 1)+tolerance).view(-1,1)
 
-#                 loss = ratio_cut + self.l*penalty
-#                 loss.backward()
-#                 self.optim.step()
+                z = self.encode(x)
 
-#                 overall_loss += loss.item()
-#                 rc_loss += ratio_cut.item()
-#                 pen_loss += penalty.item()
+                # compute losses
+                ratio_cut = torch.sum(torch.pow(S*torch.cdist(z/D, z/D), 2))/2
+                penalty = torch.norm(torch.mm(z.T, z) - torch.eye(z.shape[1], device = self.device), p='fro')
+                loss = ratio_cut + constraint_weight*penalty
 
-#             if (self.scheduler_steps is not None) & (epoch in self.scheduler_steps):
-#                 self.scheduler.step()
+                loss.backward()
+                opt.step()
+            
+                train_loss+=loss.item()
+                ratio_cut_loss+=ratio_cut.item()
+                penalty_loss+=penalty.item()
+                n_size+=x.shape[0]
+            
+            train_loss/=n_size
+            ratio_cut_loss/=n_size
+            penalty_loss/=n_size
+            output_string = output_string + f'Train Loss: {round(train_loss, 5)} ||\
+                  Ratio Cut: {round(ratio_cut_loss, 5)} ||\
+                    Penalty: {round(penalty_loss, 5)}'
+            
+            pbar.set_description(f'Epoch {epoch}: '+ output_string)
 
-#     def save(self, path: str):
-#         """
-#         """
-#         torch.save(self.net, path)             
+            if (scheduler_steps is not None) & (epoch+1 in scheduler_steps):
+                opt_scheduler.step()
 
-#     def predict(self, X: torch.Tensor, device = torch.device('cpu')) -> torch.Tensor:
-#         """
-#         """
-#         self.net = self.net.to(device=device)
-#         return self.net(X)
-
+        self.last_device = device
+        self.last_config = {'optimizer': opt, 
+                            'opt_scheduler': opt_scheduler,
+                            'epochs': epochs,
+                            'scheduler_steps': scheduler_steps}
+        print('Model Training is finished')
