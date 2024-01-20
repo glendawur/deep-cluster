@@ -141,9 +141,6 @@ class Autoencoder(torch.nn.Module):
 
             pbar.set_description(f'Epoch {epoch}: '+output_string)
 
-            if (self.scheduler_steps is not None) & (epoch in self.scheduler_steps):
-#                 self.scheduler.step()
-
         n_size=0
         test_loss = 0
         if test_dataset is not None:
