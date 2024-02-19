@@ -1,4 +1,4 @@
-from typing import List, Union
+from typing import List, Union, Tuple
 
 import tqdm
 import torch
@@ -17,7 +17,7 @@ class RobustSpectralMap(torch.nn.Module):
     def __init__(self,
                  encoder: torch.nn.Module,
                  ) -> None:
-        super(RobustSpectralMap).__init__()
+        super(RobustSpectralMap, self).__init__()
         self.encoder = encoder
         
     def encode(self, x):
@@ -38,10 +38,10 @@ class RobustSpectralMap(torch.nn.Module):
 
 
     def fit(self, 
-            train_dataset: Union[Dataset, DataLoader, Tensor],
+            train_dataset: Union[Dataset, DataLoader, Tuple[Tensor, Tensor]],
             optimizer: torch.optim.Optimizer = torch.optim.Adam,
             optimizer_config: dict = {'lr': 0.001, 
-                                      'etas': (0.9, 0.999), 
+                                      'betas': (0.9, 0.999), 
                                       'eps': 1e-8, 
                                       'weight_decay': 1e-05},
             constraint_weight: float = 1.,
@@ -62,14 +62,14 @@ class RobustSpectralMap(torch.nn.Module):
         """
         """
         if isinstance(device, str):
-            if device == 'cuda' & torch.cuda.is_available():
+            if (device == 'cuda') & torch.cuda.is_available():
                 device = torch.device(device)
             elif not torch.cuda.is_available():
                 device = torch.device('cpu')
 
         # train dataset checks
-        if isinstance(train_dataset, Tensor):
-            train_dataset = TensorDataset(train_dataset)
+        if isinstance(train_dataset, tuple):
+            train_dataset = TensorDataset(train_dataset[0], train_dataset[1])
         if isinstance(train_dataset, Dataset):
             train_dataset = DataLoader(train_dataset, 
                                        batch_size=batch_size if batch_size is not None else 256,
@@ -82,7 +82,7 @@ class RobustSpectralMap(torch.nn.Module):
                          **optimizer_config)
         opt_scheduler = scheduler(opt, **scheduler_params)
 
-        pbar = tqdm.trange(stop=epochs, leave=True)
+        pbar = tqdm.trange(epochs, leave=True)
         for epoch in pbar:
             output_string = ''
             train_loss = 0
@@ -90,18 +90,19 @@ class RobustSpectralMap(torch.nn.Module):
             penalty_loss = 0
             n_size = 0
 
-            for batch_id, (x, y, idx) in enumerate(train_dataset):
+            for batch_id, (x, y) in enumerate(train_dataset):
                 opt.zero_grad()
                 x,y = x.to(device), y.to(device)
 
-                S = graph_kernel.compute(x, x)
+                # change the view later
+                S = graph_kernel.compute(x.view(x.shape[0], -1), x.view(x.shape[0], -1))
                 D = torch.sqrt(S.sum(dim = 1)+tolerance).view(-1,1)
 
                 z = self.encode(x)
 
                 # compute losses
                 ratio_cut = torch.sum(torch.pow(S*torch.cdist(z/D, z/D), 2))/2
-                penalty = torch.norm(torch.mm(z.T, z) - torch.eye(z.shape[1], device = self.device), p='fro')
+                penalty = torch.norm(torch.mm(z.T, z) - torch.eye(z.shape[1], device = device), p='fro')
                 loss = ratio_cut + constraint_weight*penalty
 
                 loss.backward()
@@ -115,9 +116,7 @@ class RobustSpectralMap(torch.nn.Module):
             train_loss/=n_size
             ratio_cut_loss/=n_size
             penalty_loss/=n_size
-            output_string = output_string + f'Train Loss: {round(train_loss, 5)} ||\
-                  Ratio Cut: {round(ratio_cut_loss, 5)} ||\
-                    Penalty: {round(penalty_loss, 5)}'
+            output_string = output_string + f'Train Loss: {round(train_loss, 5)} || Ratio Cut: {round(ratio_cut_loss, 5)} || Penalty: {round(penalty_loss, 5)}'
             
             pbar.set_description(f'Epoch {epoch}: '+ output_string)
 
